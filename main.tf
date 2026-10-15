@@ -29,20 +29,28 @@ resource "random_string" "suffix" {
   upper   = false
 }
 
-# Storage account (Entra ID auth only, no public blob access)
-resource "azurerm_storage_account" "attachments" {
-  name                            = "st${local.short}${random_string.suffix.result}"
-  resource_group_name             = data.azurerm_resource_group.app.name
-  location                        = data.azurerm_resource_group.app.location
-  account_tier                    = "Standard"
-  account_replication_type        = "LRS"
-  min_tls_version                 = "TLS1_2"
-  allow_nested_items_to_be_public = false
-  shared_access_key_enabled       = false
-  default_to_oauth_authentication = true
+# Storage account (Entra ID auth only, no public blob access).
+# Created via azapi: azurerm_storage_account polls the blob data plane with shared keys,
+# which fails with KeyBasedAuthenticationNotPermitted when shared keys are disabled.
+resource "azapi_resource" "storage" {
+  type      = "Microsoft.Storage/storageAccounts@2023-05-01"
+  name      = "st${local.short}${random_string.suffix.result}"
+  parent_id = data.azurerm_resource_group.app.id
+  location  = data.azurerm_resource_group.app.location
   tags = {
     app_name  = var.app_name
     ManagedBy = "terraform"
+  }
+  body = {
+    kind = "StorageV2"
+    sku  = { name = "Standard_LRS" }
+    properties = {
+      minimumTlsVersion            = "TLS1_2"
+      allowBlobPublicAccess        = false
+      allowSharedKeyAccess         = false
+      defaultToOAuthAuthentication = true
+      supportsHttpsTrafficOnly     = true
+    }
   }
 }
 
@@ -50,7 +58,7 @@ resource "azurerm_storage_account" "attachments" {
 resource "azapi_resource" "container" {
   type      = "Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01"
   name      = "attachments"
-  parent_id = "${azurerm_storage_account.attachments.id}/blobServices/default"
+  parent_id = "${azapi_resource.storage.id}/blobServices/default"
   body = {
     properties = {
       publicAccess = "None"
@@ -60,7 +68,7 @@ resource "azapi_resource" "container" {
 
 # Let the web app's managed identity read/write blobs
 resource "azurerm_role_assignment" "app_blob" {
-  scope                = azurerm_storage_account.attachments.id
+  scope                = azapi_resource.storage.id
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = data.azurerm_linux_web_app.app.identity[0].principal_id
   principal_type       = "ServicePrincipal"
@@ -73,7 +81,7 @@ resource "azapi_update_resource" "storage_account_secret" {
   parent_id = local.key_vault_id
   body = {
     properties = {
-      value = azurerm_storage_account.attachments.name
+      value = azapi_resource.storage.name
     }
   }
   depends_on = [azurerm_role_assignment.app_blob, azapi_resource.container]

@@ -1,6 +1,6 @@
 output "storage_account_name" {
   description = "Storage account holding attachments."
-  value       = azurerm_storage_account.attachments.name
+  value       = azapi_resource.storage.name
 }
 
 output "container_name" {
