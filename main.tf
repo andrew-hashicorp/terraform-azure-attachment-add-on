@@ -87,7 +87,53 @@ resource "azapi_update_resource" "storage_account_secret" {
   depends_on = [azurerm_role_assignment.app_blob, azapi_resource.container]
 }
 
-# On uninstall, reset the secret so the app disables attachments after its next restart.
+# App Service caches Key Vault references and a restart alone does not re-read them.
+# After the secret changes: refresh the references, then restart so the app sees the new value.
+resource "azapi_resource_action" "refresh_references" {
+  type        = "Microsoft.Web/sites@2022-03-01"
+  resource_id = data.azurerm_linux_web_app.app.id
+  action      = "config/configreferences/appsettings/refresh"
+  method      = "POST"
+
+  depends_on = [azapi_update_resource.storage_account_secret]
+  lifecycle {
+    replace_triggered_by = [azapi_update_resource.storage_account_secret]
+  }
+}
+
+resource "azapi_resource_action" "restart" {
+  type        = "Microsoft.Web/sites@2022-03-01"
+  resource_id = data.azurerm_linux_web_app.app.id
+  action      = "restart"
+  method      = "POST"
+
+  depends_on = [azapi_resource_action.refresh_references]
+  lifecycle {
+    replace_triggered_by = [azapi_resource_action.refresh_references]
+  }
+}
+
+# ---------- Uninstall ----------
+# Destroy runs in reverse dependency order: reset the secret, then refresh, then restart,
+# so the app turns attachments off as soon as the add-on is removed.
+resource "azapi_resource_action" "restart_on_destroy" {
+  type        = "Microsoft.Web/sites@2022-03-01"
+  resource_id = data.azurerm_linux_web_app.app.id
+  action      = "restart"
+  method      = "POST"
+  when        = "destroy"
+}
+
+resource "azapi_resource_action" "refresh_on_destroy" {
+  type        = "Microsoft.Web/sites@2022-03-01"
+  resource_id = data.azurerm_linux_web_app.app.id
+  action      = "config/configreferences/appsettings/refresh"
+  method      = "POST"
+  when        = "destroy"
+
+  depends_on = [azapi_resource_action.restart_on_destroy]
+}
+
 resource "azapi_resource_action" "reset_secret" {
   type        = "Microsoft.KeyVault/vaults/secrets@2023-07-01"
   resource_id = "${local.key_vault_id}/secrets/storage-account-name"
@@ -98,4 +144,6 @@ resource "azapi_resource_action" "reset_secret" {
       value = "not-configured"
     }
   }
+
+  depends_on = [azapi_resource_action.refresh_on_destroy]
 }
